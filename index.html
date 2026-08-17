@@ -11,6 +11,8 @@
       background-color: #121212;
       color: #ffffff;
       padding-bottom: 40px;
+      user-select: none;
+      -webkit-user-select: none;
     }
     header {
       text-align: center;
@@ -35,7 +37,7 @@
       border: none;
     }
     
-    /* アプリ内カメラのモーダル画面 */
+    /* アプリ内カメラ画面 */
     #cameraModal {
       display: none;
       position: fixed;
@@ -66,11 +68,12 @@
       background-color: #fff;
       border: 4px solid #8e8e93;
       cursor: pointer;
+      transition: all 0.2s ease;
     }
     .record-btn-active {
       background-color: #ff3b30 !important;
       border-radius: 12px !important;
-      transform: scale(0.8);
+      transform: scale(0.85);
     }
     .close-btn {
       background: none;
@@ -106,22 +109,38 @@
       width: 100%;
       height: 100%;
       object-fit: cover;
+      pointer-events: none; /* 長押し判定を親要素で行うため */
     }
+
+    /* 長押しで表示される削除ボタン */
     .delete-btn {
+      display: none;
       position: absolute;
       top: 6px;
       right: 6px;
-      background: rgba(0, 0, 0, 0.75);
+      background: rgba(255, 59, 48, 0.9);
       color: #ffffff;
-      border: 1px solid rgba(255, 255, 255, 0.3);
+      border: none;
       border-radius: 50%;
       width: 32px;
       height: 32px;
       font-size: 16px;
-      line-height: 30px;
+      font-weight: bold;
+      line-height: 32px;
       text-align: center;
       cursor: pointer;
       z-index: 10;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+      animation: popIn 0.2s ease;
+    }
+
+    @keyframes popIn {
+      0% { transform: scale(0); }
+      100% { transform: scale(1); }
+    }
+
+    .show-delete .delete-btn {
+      display: block;
     }
   </style>
 </head>
@@ -141,7 +160,6 @@
     <div id="gallery" class="gallery"></div>
   </main>
 
-  <!-- ブラウザ内カメラ画面 -->
   <div id="cameraModal">
     <video id="videoPreview" autoplay playsinline muted></video>
     <div class="cam-controls">
@@ -160,13 +178,18 @@
 
     let db = null;
     let currentStream = null;
-    let mode = 'image'; // 'image' or 'video'
+    let mode = 'image';
     let mediaRecorder = null;
     let recordedChunks = [];
     let isRecording = false;
 
-    // IndexedDBのセットアップ
-    const req = indexedDB.open("SecretPrivateAlbumDB", 1);
+    // ブラウザのストレージ保護要求
+    if (navigator.storage && navigator.storage.persist) {
+      navigator.storage.persist();
+    }
+
+    // Database初期化
+    const req = indexedDB.open("SecretPersistentDB_v3", 1);
     req.onupgradeneeded = (e) => {
       const database = e.target.result;
       if (!database.objectStoreNames.contains("items")) {
@@ -177,44 +200,43 @@
       db = e.target.result;
       loadGallery();
     };
+    req.onerror = () => {
+      statusEl.textContent = "データベースの接続に失敗しました";
+    };
 
-    // アプリ内カメラの起動（外部の共有・写真アプリを通さない）
+    // カメラの起動
     async function openCamera(selectedMode) {
       mode = selectedMode;
       try {
-        currentStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { exact: "environment" } },
+        const constraints = {
+          video: { facingMode: { ideal: "environment" } },
           audio: mode === 'video'
-        }).catch(async () => {
-          return await navigator.mediaDevices.getUserMedia({
-            video: true,
-            audio: mode === 'video'
-          });
-        });
-
+        };
+        
+        currentStream = await navigator.mediaDevices.getUserMedia(constraints);
         videoPreview.srcObject = currentStream;
         cameraModal.style.display = "flex";
 
         if (mode === 'image') {
+          shutterBtn.classList.remove("record-btn-active");
           shutterBtn.onclick = takePhoto;
         } else {
           shutterBtn.onclick = toggleRecording;
         }
       } catch (err) {
-        alert("カメラの起動に失敗しました。アクセスを許可してください。");
+        alert("カメラの許可が必要です。");
       }
     }
 
-    // カメラの停止と終了
     function closeCamera() {
+      if (isRecording) stopRecording();
       if (currentStream) {
         currentStream.getTracks().forEach(track => track.stop());
       }
       cameraModal.style.display = "none";
-      if (isRecording) stopRecording();
     }
 
-    // 写真撮影（キャンバス経由で直接保存）
+    // 写真撮影 (Blob変換)
     function takePhoto() {
       const canvas = document.createElement("canvas");
       canvas.width = videoPreview.videoWidth;
@@ -222,12 +244,13 @@
       const ctx = canvas.getContext("2d");
       ctx.drawImage(videoPreview, 0, 0);
 
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
-      saveItem("image", dataUrl);
-      closeCamera();
+      canvas.toBlob((blob) => {
+        saveItem("image", blob);
+        closeCamera();
+      }, "image/jpeg", 0.85);
     }
 
-    // 動画撮影コントロール
+    // 動画撮影
     function toggleRecording() {
       if (!isRecording) {
         startRecording();
@@ -238,18 +261,21 @@
 
     function startRecording() {
       recordedChunks = [];
-      mediaRecorder = new MediaRecorder(currentStream);
+      let mimeType = 'video/webm';
+      if (MediaRecorder.isTypeSupported('video/mp4')) {
+        mimeType = 'video/mp4';
+      }
+
+      mediaRecorder = new MediaRecorder(currentStream, { mimeType });
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) recordedChunks.push(e.data);
       };
+
       mediaRecorder.onstop = () => {
-        const blob = new Blob(recordedChunks, { type: "video/mp4" });
-        const reader = new FileReader();
-        reader.onload = () => {
-          saveItem("video", reader.result);
-        };
-        reader.readAsDataURL(blob);
+        const blob = new Blob(recordedChunks, { type: mimeType });
+        saveItem("video", blob);
       };
+
       mediaRecorder.start();
       isRecording = true;
       shutterBtn.classList.add("record-btn-active");
@@ -264,20 +290,31 @@
       }
     }
 
-    // 内部データベースへの保存
-    function saveItem(type, data) {
+    // IndexedDBへ直接Blobで確実に保存
+    function saveItem(type, blobData) {
       if (!db) return;
+      statusEl.textContent = "保存中...";
+      
       const tx = db.transaction(["items"], "readwrite");
       const store = tx.objectStore("items");
+      
       store.add({
         type: type,
-        data: data,
+        blob: blobData,
         createdAt: Date.now()
       });
-      tx.oncomplete = () => loadGallery();
+
+      tx.oncomplete = () => {
+        statusEl.textContent = "";
+        loadGallery();
+      };
+      
+      tx.onerror = () => {
+        statusEl.textContent = "保存に失敗しました";
+      };
     }
 
-    // 画面への一覧描画
+    // ギャラリー表示と長押し削除イベントのセットアップ
     function loadGallery() {
       if (!db) return;
       const tx = db.transaction(["items"], "readonly");
@@ -301,23 +338,52 @@
           const card = document.createElement("div");
           card.className = "media-card";
 
+          const blobUrl = URL.createObjectURL(item.blob);
+
           if (item.type === "image") {
             const img = document.createElement("img");
-            img.src = item.data;
+            img.src = blobUrl;
             card.appendChild(img);
           } else {
             const video = document.createElement("video");
-            video.src = item.data;
+            video.src = blobUrl;
             video.controls = true;
             video.playsInline = true;
             card.appendChild(video);
           }
 
+          // 削除用ボタン（初期状態は非表示）
           const delBtn = document.createElement("button");
           delBtn.className = "delete-btn";
           delBtn.innerHTML = "✕";
-          delBtn.onclick = () => deleteItem(item.id);
+          delBtn.onclick = (e) => {
+            e.stopPropagation();
+            deleteItem(item.id);
+          };
           card.appendChild(delBtn);
+
+          // 長押し判定タイマー
+          let pressTimer;
+
+          const startPress = () => {
+            pressTimer = setTimeout(() => {
+              card.classList.add("show-delete");
+            }, 500); // 0.5秒長押しで表示
+          };
+
+          const cancelPress = () => {
+            clearTimeout(pressTimer);
+          };
+
+          // タッチイベント
+          card.addEventListener("touchstart", startPress, { passive: true });
+          card.addEventListener("touchend", cancelPress);
+          card.addEventListener("touchmove", cancelPress);
+
+          // マウスイベント (PC確認用)
+          card.addEventListener("mousedown", startPress);
+          card.addEventListener("mouseup", cancelPress);
+          card.addEventListener("mouseleave", cancelPress);
 
           galleryEl.appendChild(card);
         });
@@ -325,12 +391,21 @@
     }
 
     function deleteItem(id) {
-      if (!confirm("削除しますか？")) return;
+      if (!confirm("このデータを削除しますか？")) return;
       const tx = db.transaction(["items"], "readwrite");
       const store = tx.objectStore("items");
       store.delete(id);
       tx.oncomplete = () => loadGallery();
     }
+
+    // 画面のどこかをタップしたら削除ボタンを隠す
+    document.addEventListener("click", (e) => {
+      if (!e.target.closest(".media-card")) {
+        document.querySelectorAll(".media-card").forEach(card => {
+          card.classList.remove("show-delete");
+        });
+      }
+    });
   </script>
 </body>
 </html>
