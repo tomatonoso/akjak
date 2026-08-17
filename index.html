@@ -23,6 +23,48 @@
     h1 { font-size: 1.1rem; }
     main { padding: 15px; max-width: 500px; margin: 0 auto; }
     
+    /* ロック画面 */
+    #lockScreen {
+      position: fixed;
+      top: 0; left: 0; width: 100vw; height: 100vh;
+      background-color: #121212;
+      z-index: 10000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .pass-title {
+      font-size: 1.2rem;
+      font-weight: bold;
+      margin-bottom: 20px;
+    }
+    .pass-input-container {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .pass-input {
+      width: 48px;
+      height: 56px;
+      font-size: 1.5rem;
+      text-align: center;
+      background-color: #1e1e1e;
+      border: 2px solid #333;
+      border-radius: 8px;
+      color: #fff;
+    }
+    .pass-input:focus {
+      border-color: #0a84ff;
+      outline: none;
+    }
+    .error-msg {
+      color: #ff453a;
+      font-size: 0.85rem;
+      height: 20px;
+    }
+
     .controls { display: flex; gap: 10px; margin-bottom: 15px; }
     .btn {
       flex: 1;
@@ -109,7 +151,7 @@
       width: 100%;
       height: 100%;
       object-fit: cover;
-      pointer-events: none; /* 長押し判定を親要素で行うため */
+      pointer-events: none;
     }
 
     /* 長押しで表示される削除ボタン */
@@ -146,6 +188,18 @@
 </head>
 <body>
 
+  <!-- ロック画面 -->
+  <div id="lockScreen">
+    <div class="pass-title">パスワードを入力</div>
+    <div class="pass-input-container">
+      <input type="password" class="pass-input" maxlength="1" pattern="\d*" inputmode="numeric" id="p1" autofocus>
+      <input type="password" class="pass-input" maxlength="1" pattern="\d*" inputmode="numeric" id="p2">
+      <input type="password" class="pass-input" maxlength="1" pattern="\d*" inputmode="numeric" id="p3">
+      <input type="password" class="pass-input" maxlength="1" pattern="\d*" inputmode="numeric" id="p4">
+    </div>
+    <div id="passError" class="error-msg"></div>
+  </div>
+
   <header>
     <h1>秘密のアルバム</h1>
   </header>
@@ -170,6 +224,42 @@
   </div>
 
   <script>
+    const CORRECT_PASS = "1104";
+    const passInputs = [document.getElementById("p1"), document.getElementById("p2"), document.getElementById("p3"), document.getElementById("p4")];
+    const passError = document.getElementById("passError");
+    const lockScreen = document.getElementById("lockScreen");
+
+    // パスワード入力の挙動設定
+    passInputs.forEach((input, index) => {
+      input.addEventListener("input", (e) => {
+        if (e.target.value.length === 1) {
+          if (index < 3) {
+            passInputs[index + 1].focus();
+          } else {
+            checkPassword();
+          }
+        }
+      });
+
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Backspace" && !e.target.value && index > 0) {
+          passInputs[index - 1].focus();
+        }
+      });
+    });
+
+    function checkPassword() {
+      const enteredPass = passInputs.map(input => input.value).join("");
+      if (enteredPass === CORRECT_PASS) {
+        lockScreen.style.display = "none";
+        initApp();
+      } else {
+        passError.textContent = "パスワードが違います";
+        passInputs.forEach(input => input.value = "");
+        passInputs[0].focus();
+      }
+    }
+
     const statusEl = document.getElementById("status");
     const galleryEl = document.getElementById("gallery");
     const cameraModal = document.getElementById("cameraModal");
@@ -183,28 +273,28 @@
     let recordedChunks = [];
     let isRecording = false;
 
-    // ブラウザのストレージ保護要求
-    if (navigator.storage && navigator.storage.persist) {
-      navigator.storage.persist();
+    // パスワード通過後に起動
+    function initApp() {
+      if (navigator.storage && navigator.storage.persist) {
+        navigator.storage.persist();
+      }
+
+      const req = indexedDB.open("SecretPersistentDB_v3", 1);
+      req.onupgradeneeded = (e) => {
+        const database = e.target.result;
+        if (!database.objectStoreNames.contains("items")) {
+          database.createObjectStore("items", { keyPath: "id", autoIncrement: true });
+        }
+      };
+      req.onsuccess = (e) => {
+        db = e.target.result;
+        loadGallery();
+      };
+      req.onerror = () => {
+        statusEl.textContent = "データベースの接続に失敗しました";
+      };
     }
 
-    // Database初期化
-    const req = indexedDB.open("SecretPersistentDB_v3", 1);
-    req.onupgradeneeded = (e) => {
-      const database = e.target.result;
-      if (!database.objectStoreNames.contains("items")) {
-        database.createObjectStore("items", { keyPath: "id", autoIncrement: true });
-      }
-    };
-    req.onsuccess = (e) => {
-      db = e.target.result;
-      loadGallery();
-    };
-    req.onerror = () => {
-      statusEl.textContent = "データベースの接続に失敗しました";
-    };
-
-    // カメラの起動
     async function openCamera(selectedMode) {
       mode = selectedMode;
       try {
@@ -236,7 +326,6 @@
       cameraModal.style.display = "none";
     }
 
-    // 写真撮影 (Blob変換)
     function takePhoto() {
       const canvas = document.createElement("canvas");
       canvas.width = videoPreview.videoWidth;
@@ -250,7 +339,6 @@
       }, "image/jpeg", 0.85);
     }
 
-    // 動画撮影
     function toggleRecording() {
       if (!isRecording) {
         startRecording();
@@ -290,7 +378,6 @@
       }
     }
 
-    // IndexedDBへ直接Blobで確実に保存
     function saveItem(type, blobData) {
       if (!db) return;
       statusEl.textContent = "保存中...";
@@ -314,7 +401,6 @@
       };
     }
 
-    // ギャラリー表示と長押し削除イベントのセットアップ
     function loadGallery() {
       if (!db) return;
       const tx = db.transaction(["items"], "readonly");
@@ -352,7 +438,6 @@
             card.appendChild(video);
           }
 
-          // 削除用ボタン（初期状態は非表示）
           const delBtn = document.createElement("button");
           delBtn.className = "delete-btn";
           delBtn.innerHTML = "✕";
@@ -362,25 +447,22 @@
           };
           card.appendChild(delBtn);
 
-          // 長押し判定タイマー
           let pressTimer;
 
           const startPress = () => {
             pressTimer = setTimeout(() => {
               card.classList.add("show-delete");
-            }, 500); // 0.5秒長押しで表示
+            }, 500);
           };
 
           const cancelPress = () => {
             clearTimeout(pressTimer);
           };
 
-          // タッチイベント
           card.addEventListener("touchstart", startPress, { passive: true });
           card.addEventListener("touchend", cancelPress);
           card.addEventListener("touchmove", cancelPress);
 
-          // マウスイベント (PC確認用)
           card.addEventListener("mousedown", startPress);
           card.addEventListener("mouseup", cancelPress);
           card.addEventListener("mouseleave", cancelPress);
@@ -398,12 +480,16 @@
       tx.oncomplete = () => loadGallery();
     }
 
-    // 画面のどこかをタップしたら削除ボタンを隠す
     document.addEventListener("click", (e) => {
       if (!e.target.closest(".media-card")) {
         document.querySelectorAll(".media-card").forEach(card => {
           card.classList.remove("show-delete");
         });
+      }
+    });
+  </script>
+</body>
+</html>
       }
     });
   </script>
