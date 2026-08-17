@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>秘密の写真</title>
+  <title>秘密のアルバム</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background-color: #121212;
       color: #ffffff;
-      padding-bottom: 30px;
+      padding-bottom: 40px;
     }
     header {
       text-align: center;
@@ -20,7 +20,8 @@
     }
     h1 { font-size: 1.1rem; }
     main { padding: 15px; max-width: 500px; margin: 0 auto; }
-    .controls { display: flex; gap: 10px; margin-bottom: 20px; }
+    
+    .controls { display: flex; gap: 10px; margin-bottom: 15px; }
     .btn {
       flex: 1;
       text-align: center;
@@ -31,23 +32,61 @@
       cursor: pointer;
       background-color: #0a84ff;
       color: white;
-      display: block;
-      user-select: none;
+      border: none;
     }
-    .video-btn { background-color: #ff453a; }
-    .reset-btn {
-      background-color: #3a3a3c;
-      font-size: 0.8rem;
-      padding: 8px;
-      margin-top: 15px;
+    
+    /* アプリ内カメラのモーダル画面 */
+    #cameraModal {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; width: 100vw; height: 100vh;
+      background-color: #000;
+      z-index: 9999;
+      flex-direction: column;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 0;
     }
-    input[type="file"] { display: none; }
+    #videoPreview {
+      width: 100%;
+      height: 70vh;
+      object-fit: cover;
+    }
+    .cam-controls {
+      display: flex;
+      justify-content: space-around;
+      align-items: center;
+      width: 100%;
+      padding: 10px 20px;
+    }
+    .shutter-btn {
+      width: 70px;
+      height: 70px;
+      border-radius: 50%;
+      background-color: #fff;
+      border: 4px solid #8e8e93;
+      cursor: pointer;
+    }
+    .record-btn-active {
+      background-color: #ff3b30 !important;
+      border-radius: 12px !important;
+      transform: scale(0.8);
+    }
+    .close-btn {
+      background: none;
+      border: none;
+      color: #fff;
+      font-size: 1rem;
+      cursor: pointer;
+    }
+
     .status-msg {
       text-align: center;
       font-size: 0.85rem;
       color: #8e8e93;
       margin-bottom: 15px;
     }
+
     .gallery {
       display: grid;
       grid-template-columns: repeat(2, 1fr);
@@ -72,14 +111,14 @@
       position: absolute;
       top: 6px;
       right: 6px;
-      background: rgba(0, 0, 0, 0.7);
+      background: rgba(0, 0, 0, 0.75);
       color: #ffffff;
-      border: none;
+      border: 1px solid rgba(255, 255, 255, 0.3);
       border-radius: 50%;
       width: 32px;
       height: 32px;
       font-size: 16px;
-      line-height: 32px;
+      line-height: 30px;
       text-align: center;
       cursor: pointer;
       z-index: 10;
@@ -94,145 +133,163 @@
 
   <main>
     <div class="controls">
-      <label class="btn">
-        📷 写真を撮影
-        <input type="file" id="photoInput" accept="image/*" capture="environment">
-      </label>
-      <label class="btn video-btn">
-        🎥 動画を撮影
-        <input type="file" id="videoInput" accept="video/*" capture="environment">
-      </label>
+      <button class="btn" onclick="openCamera('image')">📷 写真を撮影</button>
+      <button class="btn" style="background-color: #ff453a;" onclick="openCamera('video')">🎥 動画を撮影</button>
     </div>
 
-    <div id="status" class="status-msg">起動中...</div>
+    <div id="status" class="status-msg"></div>
     <div id="gallery" class="gallery"></div>
-
-    <button class="btn reset-btn" onclick="resetDB()">⚠️ データベースを強制初期化</button>
   </main>
+
+  <!-- ブラウザ内カメラ画面 -->
+  <div id="cameraModal">
+    <video id="videoPreview" autoplay playsinline muted></video>
+    <div class="cam-controls">
+      <button class="close-btn" onclick="closeCamera()">キャンセル</button>
+      <button id="shutterBtn" class="shutter-btn"></button>
+      <div style="width: 60px;"></div>
+    </div>
+  </div>
 
   <script>
     const statusEl = document.getElementById("status");
     const galleryEl = document.getElementById("gallery");
-    const photoInput = document.getElementById("photoInput");
-    const videoInput = document.getElementById("videoInput");
+    const cameraModal = document.getElementById("cameraModal");
+    const videoPreview = document.getElementById("videoPreview");
+    const shutterBtn = document.getElementById("shutterBtn");
 
     let db = null;
+    let currentStream = null;
+    let mode = 'image'; // 'image' or 'video'
+    let mediaRecorder = null;
+    let recordedChunks = [];
+    let isRecording = false;
 
-    // バージョンを更新して自動移行
-    const request = indexedDB.open("SecretMediaDB_v2", 1);
-
-    request.onerror = (e) => {
-      statusEl.textContent = "DBの起動に失敗しました（プライベートモード等の可能性があります）。";
-    };
-
-    request.onupgradeneeded = (e) => {
-      db = e.target.result;
-      if (!db.objectStoreNames.contains("media")) {
-        db.createObjectStore("media", { keyPath: "id", autoIncrement: true });
+    // IndexedDBのセットアップ
+    const req = indexedDB.open("SecretPrivateAlbumDB", 1);
+    req.onupgradeneeded = (e) => {
+      const database = e.target.result;
+      if (!database.objectStoreNames.contains("items")) {
+        database.createObjectStore("items", { keyPath: "id", autoIncrement: true });
       }
     };
-
-    request.onsuccess = (e) => {
+    req.onsuccess = (e) => {
       db = e.target.result;
-      statusEl.textContent = "";
       loadGallery();
     };
 
-    photoInput.addEventListener("change", (e) => handlePhotoSelect(e));
-    videoInput.addEventListener("change", (e) => handleVideoSelect(e));
-
-    function handlePhotoSelect(e) {
-      const file = e.target.files[0];
-      if (!file) return;
-
-      statusEl.textContent = "写真を保存中...";
-
-      const img = new Image();
-      const url = URL.createObjectURL(file);
-
-      img.onload = () => {
-        URL.revokeObjectURL(url);
-        
-        const maxSide = 1000;
-        let width = img.width;
-        let height = img.height;
-
-        if (width > height && width > maxSide) {
-          height = Math.round((height * maxSide) / width);
-          width = maxSide;
-        } else if (height > maxSide) {
-          width = Math.round((width * maxSide) / height);
-          height = maxSide;
-        }
-
-        const canvas = document.createElement("canvas");
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, width, height);
-
-        const compressedData = canvas.toDataURL("image/jpeg", 0.7);
-        saveToDB("image", compressedData, e.target);
-      };
-
-      img.onerror = () => {
-        statusEl.textContent = "画像の読み込みに失敗しました。";
-      };
-
-      img.src = url;
-    }
-
-    function handleVideoSelect(e) {
-      const file = e.target.files[0];
-      if (!file) return;
-
-      statusEl.textContent = "動画を保存中...";
-      saveToDB("video", file, e.target);
-    }
-
-    function saveToDB(type, data, inputEl) {
-      if (!db) {
-        statusEl.textContent = "DBが開かれていません。";
-        return;
-      }
-
+    // アプリ内カメラの起動（外部の共有・写真アプリを通さない）
+    async function openCamera(selectedMode) {
+      mode = selectedMode;
       try {
-        const tx = db.transaction(["media"], "readwrite");
-        const store = tx.objectStore("media");
-        
-        store.add({
-          type: type,
-          data: data,
-          createdAt: new Date().getTime()
+        currentStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { exact: "environment" } },
+          audio: mode === 'video'
+        }).catch(async () => {
+          return await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: mode === 'video'
+          });
         });
 
-        tx.oncomplete = () => {
-          statusEl.textContent = "";
-          loadGallery();
-          inputEl.value = "";
-        };
+        videoPreview.srcObject = currentStream;
+        cameraModal.style.display = "flex";
 
-        tx.onerror = () => {
-          statusEl.textContent = "保存中にエラーが発生しました。";
-        };
+        if (mode === 'image') {
+          shutterBtn.onclick = takePhoto;
+        } else {
+          shutterBtn.onclick = toggleRecording;
+        }
       } catch (err) {
-        statusEl.textContent = "エラー: " + err.message;
+        alert("カメラの起動に失敗しました。アクセスを許可してください。");
       }
     }
 
+    // カメラの停止と終了
+    function closeCamera() {
+      if (currentStream) {
+        currentStream.getTracks().forEach(track => track.stop());
+      }
+      cameraModal.style.display = "none";
+      if (isRecording) stopRecording();
+    }
+
+    // 写真撮影（キャンバス経由で直接保存）
+    function takePhoto() {
+      const canvas = document.createElement("canvas");
+      canvas.width = videoPreview.videoWidth;
+      canvas.height = videoPreview.videoHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(videoPreview, 0, 0);
+
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
+      saveItem("image", dataUrl);
+      closeCamera();
+    }
+
+    // 動画撮影コントロール
+    function toggleRecording() {
+      if (!isRecording) {
+        startRecording();
+      } else {
+        stopRecording();
+      }
+    }
+
+    function startRecording() {
+      recordedChunks = [];
+      mediaRecorder = new MediaRecorder(currentStream);
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) recordedChunks.push(e.data);
+      };
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(recordedChunks, { type: "video/mp4" });
+        const reader = new FileReader();
+        reader.onload = () => {
+          saveItem("video", reader.result);
+        };
+        reader.readAsDataURL(blob);
+      };
+      mediaRecorder.start();
+      isRecording = true;
+      shutterBtn.classList.add("record-btn-active");
+    }
+
+    function stopRecording() {
+      if (mediaRecorder && isRecording) {
+        mediaRecorder.stop();
+        isRecording = false;
+        shutterBtn.classList.remove("record-btn-active");
+        closeCamera();
+      }
+    }
+
+    // 内部データベースへの保存
+    function saveItem(type, data) {
+      if (!db) return;
+      const tx = db.transaction(["items"], "readwrite");
+      const store = tx.objectStore("items");
+      store.add({
+        type: type,
+        data: data,
+        createdAt: Date.now()
+      });
+      tx.oncomplete = () => loadGallery();
+    }
+
+    // 画面への一覧描画
     function loadGallery() {
       if (!db) return;
+      const tx = db.transaction(["items"], "readonly");
+      const store = tx.objectStore("items");
+      const request = store.getAll();
 
-      const tx = db.transaction(["media"], "readonly");
-      const store = tx.objectStore("media");
-      const req = store.getAll();
-
-      req.onsuccess = () => {
-        const items = req.result || [];
+      request.onsuccess = () => {
+        const items = request.result || [];
         galleryEl.innerHTML = "";
 
         if (items.length === 0) {
-          statusEl.textContent = "保存されたデータはありません。";
+          statusEl.textContent = "保存されたデータはありません";
           return;
         } else {
           statusEl.textContent = "";
@@ -250,11 +307,7 @@
             card.appendChild(img);
           } else {
             const video = document.createElement("video");
-            if (item.data instanceof Blob) {
-              video.src = URL.createObjectURL(item.data);
-            } else {
-              video.src = item.data;
-            }
+            video.src = item.data;
             video.controls = true;
             video.playsInline = true;
             card.appendChild(video);
@@ -263,33 +316,20 @@
           const delBtn = document.createElement("button");
           delBtn.className = "delete-btn";
           delBtn.innerHTML = "✕";
-          delBtn.onclick = () => deleteMedia(item.id);
+          delBtn.onclick = () => deleteItem(item.id);
           card.appendChild(delBtn);
 
           galleryEl.appendChild(card);
         });
       };
-
-      req.onerror = () => {
-        statusEl.textContent = "データの読み込みに失敗しました。";
-      };
     }
 
-    function deleteMedia(id) {
+    function deleteItem(id) {
       if (!confirm("削除しますか？")) return;
-
-      const tx = db.transaction(["media"], "readwrite");
-      const store = tx.objectStore("media");
+      const tx = db.transaction(["items"], "readwrite");
+      const store = tx.objectStore("items");
       store.delete(id);
       tx.oncomplete = () => loadGallery();
-    }
-
-    function resetDB() {
-      if (confirm("すべての保存データを削除して初期化しますか？")) {
-        indexedDB.deleteDatabase("SecretMediaDB");
-        indexedDB.deleteDatabase("SecretMediaDB_v2");
-        location.reload();
-      }
     }
   </script>
 </body>
