@@ -13,6 +13,7 @@
       padding-bottom: 40px;
       user-select: none;
       -webkit-user-select: none;
+      -webkit-touch-callout: none; /* 長押しによる保存メニュー禁止 */
     }
     header {
       text-align: center;
@@ -91,10 +92,28 @@
       justify-content: space-between;
       padding: 20px 0;
     }
-    #videoPreview {
+    .camera-preview-container {
+      position: relative;
       width: 100%;
       height: 70vh;
+    }
+    #videoPreview {
+      width: 100%;
+      height: 100%;
       object-fit: cover;
+    }
+    /* タイマーカウントダウン表示 */
+    #countdownOverlay {
+      display: none;
+      position: absolute;
+      top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0, 0, 0, 0.3);
+      color: #fff;
+      font-size: 6rem;
+      font-weight: bold;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
     }
     .cam-controls {
       display: flex;
@@ -117,12 +136,13 @@
       border-radius: 12px !important;
       transform: scale(0.85);
     }
-    .close-btn {
+    .close-btn, .switch-btn, .timer-btn {
       background: none;
       border: none;
       color: #fff;
-      font-size: 1rem;
+      font-size: 0.9rem;
       cursor: pointer;
+      padding: 10px;
     }
 
     .status-msg {
@@ -153,7 +173,11 @@
       object-fit: cover;
     }
 
-    /* 動画再生タップを有効化し、長押し削除も可能に設定 */
+    /* ダウンロードメニュー・保存の禁止設定 */
+    video::-internal-media-controls-download-button { display: none !important; }
+    video::-webkit-media-controls-enclosure { overflow: hidden; }
+    video::-webkit-media-controls-panel { width: calc(100% + 30px); }
+
     .media-card video {
       pointer-events: auto;
     }
@@ -195,7 +219,6 @@
 </head>
 <body>
 
-  <!-- ロック画面 -->
   <div id="lockScreen">
     <div class="pass-title">パスワードを入力</div>
     <div class="pass-input-container">
@@ -222,11 +245,15 @@
   </main>
 
   <div id="cameraModal">
-    <video id="videoPreview" autoplay playsinline muted></video>
+    <div class="camera-preview-container">
+      <video id="videoPreview" autoplay playsinline muted></video>
+      <div id="countdownOverlay"></div>
+    </div>
     <div class="cam-controls">
       <button class="close-btn" onclick="closeCamera()">キャンセル</button>
+      <button id="timerBtn" class="timer-btn" onclick="toggleTimer()">⏱ オフ</button>
       <button id="shutterBtn" class="shutter-btn"></button>
-      <div style="width: 60px;"></div>
+      <button class="switch-btn" onclick="switchCamera()">🔄 切替</button>
     </div>
   </div>
 
@@ -271,6 +298,8 @@
     const cameraModal = document.getElementById("cameraModal");
     const videoPreview = document.getElementById("videoPreview");
     const shutterBtn = document.getElementById("shutterBtn");
+    const timerBtn = document.getElementById("timerBtn");
+    const countdownOverlay = document.getElementById("countdownOverlay");
 
     let db = null;
     let currentStream = null;
@@ -279,6 +308,9 @@
     let recordedChunks = [];
     let isRecording = false;
     let selectedMimeType = '';
+    let currentFacingMode = 'environment';
+    let timerSec = 0; // 0, 3, 10
+    let timerInterval = null;
 
     function initApp() {
       if (navigator.storage && navigator.storage.persist) {
@@ -301,22 +333,38 @@
       };
     }
 
+    async function startCameraStream() {
+      if (currentStream) {
+        currentStream.getTracks().forEach(track => track.stop());
+      }
+
+      const constraints = {
+        video: { facingMode: currentFacingMode },
+        audio: mode === 'video'
+      };
+
+      currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+      videoPreview.srcObject = currentStream;
+
+      if (currentFacingMode === 'user') {
+        videoPreview.style.transform = 'scaleX(-1)';
+      } else {
+        videoPreview.style.transform = 'scaleX(1)';
+      }
+    }
+
     async function openCamera(selectedMode) {
       mode = selectedMode;
       try {
-        const constraints = {
-          video: { facingMode: { ideal: "environment" } },
-          audio: mode === 'video'
-        };
-        
-        currentStream = await navigator.mediaDevices.getUserMedia(constraints);
-        videoPreview.srcObject = currentStream;
+        await startCameraStream();
         cameraModal.style.display = "flex";
 
         if (mode === 'image') {
+          timerBtn.style.display = "inline-block";
           shutterBtn.classList.remove("record-btn-active");
-          shutterBtn.onclick = takePhoto;
+          shutterBtn.onclick = handlePhotoShutter;
         } else {
+          timerBtn.style.display = "none";
           shutterBtn.onclick = toggleRecording;
         }
       } catch (err) {
@@ -324,7 +372,35 @@
       }
     }
 
+    function toggleTimer() {
+      if (timerSec === 0) {
+        timerSec = 3;
+        timerBtn.textContent = "⏱ 3秒";
+      } else if (timerSec === 3) {
+        timerSec = 10;
+        timerBtn.textContent = "⏱ 10秒";
+      } else {
+        timerSec = 0;
+        timerBtn.textContent = "⏱ オフ";
+      }
+    }
+
+    async function switchCamera() {
+      if (isRecording || timerInterval) return;
+      currentFacingMode = (currentFacingMode === 'environment') ? 'user' : 'environment';
+      try {
+        await startCameraStream();
+      } catch (err) {
+        alert("カメラの切り替えに失敗しました。");
+      }
+    }
+
     function closeCamera() {
+      if (timerInterval) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+        countdownOverlay.style.display = "none";
+      }
       if (isRecording) stopRecording();
       if (currentStream) {
         currentStream.getTracks().forEach(track => track.stop());
@@ -332,11 +408,41 @@
       cameraModal.style.display = "none";
     }
 
+    function handlePhotoShutter() {
+      if (timerInterval) return;
+
+      if (timerSec > 0) {
+        let count = timerSec;
+        countdownOverlay.textContent = count;
+        countdownOverlay.style.display = "flex";
+
+        timerInterval = setInterval(() => {
+          count--;
+          if (count > 0) {
+            countdownOverlay.textContent = count;
+          } else {
+            clearInterval(timerInterval);
+            timerInterval = null;
+            countdownOverlay.style.display = "none";
+            takePhoto();
+          }
+        }, 1000);
+      } else {
+        takePhoto();
+      }
+    }
+
     function takePhoto() {
       const canvas = document.createElement("canvas");
       canvas.width = videoPreview.videoWidth;
       canvas.height = videoPreview.videoHeight;
       const ctx = canvas.getContext("2d");
+
+      if (currentFacingMode === 'user') {
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+      }
+
       ctx.drawImage(videoPreview, 0, 0);
 
       canvas.toBlob((blob) => {
@@ -353,7 +459,6 @@
       }
     }
 
-    // iOS/Safariで確実に再生可能なMIMEタイプを優先判定
     function getSupportedMimeType() {
       const types = [
         'video/mp4;codecs=avc1',
@@ -446,13 +551,13 @@
           const card = document.createElement("div");
           card.className = "media-card";
 
-          // MIMEタイプを明示してBlob URLを作成
           const blob = item.mimeType ? new Blob([item.blob], { type: item.mimeType }) : item.blob;
           const blobUrl = URL.createObjectURL(blob);
 
           if (item.type === "image") {
             const img = document.createElement("img");
             img.src = blobUrl;
+            img.oncontextmenu = () => false; // コンテキストメニュー禁止
             card.appendChild(img);
           } else {
             const video = document.createElement("video");
@@ -460,6 +565,9 @@
             video.controls = true;
             video.playsInline = true;
             video.preload = "metadata";
+            // 3点メニューからダウンロードボタン等を排除
+            video.setAttribute("controlsList", "nodownload noremoteplayback");
+            video.oncontextmenu = () => false; // コンテキストメニュー禁止
             card.appendChild(video);
           }
 
@@ -510,6 +618,13 @@
         document.querySelectorAll(".media-card").forEach(card => {
           card.classList.remove("show-delete");
         });
+      }
+    });
+
+    // 右クリック・長押しメニューのグローバル防止
+    document.addEventListener("contextmenu", (e) => {
+      if (e.target.tagName === 'IMG' || e.target.tagName === 'VIDEO') {
+        e.preventDefault();
       }
     });
   </script>
